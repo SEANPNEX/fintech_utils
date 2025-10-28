@@ -8,7 +8,7 @@ A Python package providing utilities for financial data analysis, including mome
 
 ## Installation
 ```bash
-pip install git@github.com:SEANPNEX/fintech_utils.git
+pip install git+https://github.com/SEANPNEX/fintech_utils.git
 ```
 
 ## Usage
