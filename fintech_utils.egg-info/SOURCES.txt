@@ -1,6 +1,15 @@
+LICENSE
 pyproject.toml
 fintech_utils/__init__.py
 fintech_utils.egg-info/PKG-INFO
 fintech_utils.egg-info/SOURCES.txt
 fintech_utils.egg-info/dependency_links.txt
 fintech_utils.egg-info/top_level.txt
+fintech_utils/findata/__init__.py
+fintech_utils/findata/returns.py
+fintech_utils/linalg/__init__.py
+fintech_utils/linalg/mat.py
+fintech_utils/momentum/__init__.py
+fintech_utils/stats/__init__.py
+fintech_utils/stats/fit.py
+fintech_utils/stats/var.py

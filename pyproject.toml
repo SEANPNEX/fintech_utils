@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fintech_utils"
-version = "0.1.0"
-description = "Utility functions extracted from Tests.ipynb"
+version = "0.1.1"
+description = "Utility functions for Fintech"
 authors = [{ name = "Sean Guo" }]
 requires-python = ">=3.8"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["fintech_utils"]
+include = ["fintech_utils*"]

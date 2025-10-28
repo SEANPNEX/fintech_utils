@@ -4,3 +4,5 @@ Version: 0.1.0
 Summary: Utility functions extracted from Tests.ipynb
 Author: Sean Guo
 Requires-Python: >=3.8
+License-File: LICENSE
+Dynamic: license-file
