@@ -191,169 +191,112 @@ def bsm_pnl(S0, S1, X, T, r, sigma, option_type="call"):
 
 
 # --- Binomial Greeks via bump-and-reprice ---
-def binomial_greeks(
-    S, X, T, r, sigma, N,
-    option_type="call", q=0.0, american=False,
-    rel_bump_S=1e-4, abs_bump_sigma=1e-4, abs_bump_r=1e-4
-):
+class binomial_greeks:
     """
-    Compute Greeks for the binomial option pricer (supports American/European and dividend yield q)
-    using bump-and-reprice finite differences.
-
-    Parameters
-    ----------
-    S : float
-        Spot price
-    X : float
-        Strike
-    T : float
-        Time to maturity in years
-    r : float
-        Risk-free rate (continuously compounded)
-    sigma : float
-        Volatility (per year)
-    N : int
-        Number of steps in the binomial tree
-    option_type : {"call", "put"}
-    q : float
-        Continuous dividend yield
-    american : bool
-        If True, allows early exercise (American). Otherwise European.
-    rel_bump_S : float
-        Relative bump for S used in delta/gamma
-    abs_bump_sigma : float
-        Absolute bump for sigma used in vega
-    abs_bump_r : float
-        Absolute bump for r used in rho
-
-    Returns
-    -------
-    dict with keys: price, delta, gamma, vega, rho, theta
-    """
-    # Base price
-    V0 = compute_binomial_price(S, X, T, r, sigma, N, option_type=option_type, q=q, american=american)
-
-    # --- Delta & Gamma (symmetric bumps on S) ---
-    Su = S * (1.0 + rel_bump_S)
-    Sd = S * (1.0 - rel_bump_S)
-    Vu = compute_binomial_price(Su, X, T, r, sigma, N, option_type=option_type, q=q, american=american)
-    Vd = compute_binomial_price(Sd, X, T, r, sigma, N, option_type=option_type, q=q, american=american)
-    delta = (Vu - Vd) / (Su - Sd)
-    # central second derivative w.r.t S
-    gamma = (Vu - 2.0 * V0 + Vd) / ((S * rel_bump_S) ** 2)
-
-    # --- Vega (symmetric bump on sigma) ---
-    sig_u = max(sigma + abs_bump_sigma, 1e-12)
-    sig_d = max(sigma - abs_bump_sigma, 1e-12)
-    Vsig_u = compute_binomial_price(S, X, T, r, sig_u, N, option_type=option_type, q=q, american=american)
-    Vsig_d = compute_binomial_price(S, X, T, r, sig_d, N, option_type=option_type, q=q, american=american)
-    vega = (Vsig_u - Vsig_d) / (2.0 * abs_bump_sigma)
-
-    # --- Rho (symmetric bump on r) ---
-    ru = r + abs_bump_r
-    rd = r - abs_bump_r
-    Vru = compute_binomial_price(S, X, T, ru, sigma, N, option_type=option_type, q=q, american=american)
-    Vrd = compute_binomial_price(S, X, T, rd, sigma, N, option_type=option_type, q=q, american=american)
-    rho = (Vru - Vrd) / (2.0 * abs_bump_r)
-
-    # --- Theta (backward difference in time) ---
-    # Use one time step or one day, whichever is larger, to avoid too tiny dt
-    dt = max(T / max(N, 1), 1.0 / 365.0)
-    T_next = max(T - dt, np.finfo(float).eps)
-    V_next = compute_binomial_price(S, X, T_next, r, sigma, N, option_type=option_type, q=q, american=american)
-    theta = (V_next - V0) / (-dt)
-
-    return {
-        "price": V0,
-        "delta": float(delta),
-        "gamma": float(gamma),
-        "vega": float(vega),
-        "rho": float(rho),
-        "theta": float(theta),
-    }
-
-class BinomialGreeks:
-    """
-    Greeks via binomial tree (supports American/European and dividend yield q)
-    using bump-and-reprice finite differences.
-
-    Usage mirrors `bsm_greeks`:
-        g = BinomialGreeks(S, X, T, r, sigma, N, option_type="call", q=0.0, american=False)
-        g.price(); g.delta(); g.gamma(); g.vega(); g.rho(); g.theta()
+    Greeks via binomial tree (American/European, continuous dividend q)
+    with improved numerical stability and consistent drift b = r - q.
     """
     def __init__(
         self,
-        S, X, T, r, sigma, N,
+        S, X, T, r, sigma, N=1000,
         option_type="call", q=0.0, american=False,
-        rel_bump_S=1e-4, abs_bump_sigma=1e-4, abs_bump_r=1e-4
+        rel_bump_S=5e-5, abs_bump_sigma=5e-5, abs_bump_r=1e-5
     ):
         self.S = float(S)
         self.X = float(X)
         self.T = float(T)
         self.r = float(r)
+        self.q = float(q)
         self.sigma = float(sigma)
         self.N = int(N)
         self.option_type = option_type
-        self.q = float(q)
-        self.american = bool(american)
-        # bump params
-        self.rel_bump_S = float(rel_bump_S)
-        self.abs_bump_sigma = float(abs_bump_sigma)
-        self.abs_bump_r = float(abs_bump_r)
+        self.american = american
+        # bump parameters
+        self.rel_bump_S = rel_bump_S
+        self.abs_bump_sigma = abs_bump_sigma
+        self.abs_bump_r = abs_bump_r
 
-    # ---- helpers ----
+    # --- internal helper: shared stock tree ---
     def _price(self, S=None, X=None, T=None, r=None, sigma=None):
-        return compute_binomial_price(
-            S if S is not None else self.S,
-            X if X is not None else self.X,
-            T if T is not None else self.T,
-            r if r is not None else self.r,
-            sigma if sigma is not None else self.sigma,
-            self.N,
-            option_type=self.option_type,
-            q=self.q,
-            american=self.american,
-        )
+        """Core binomial price using drift b = r - q."""
+        S = self.S if S is None else S
+        X = self.X if X is None else X
+        T = self.T if T is None else T
+        r = self.r if r is None else r
+        sigma = self.sigma if sigma is None else sigma
+        q = self.q
+        N = self.N
+        option_type = self.option_type
+        american = self.american
 
-    # ---- greek methods ----
+        dt = T / N
+        u = np.exp(sigma * np.sqrt(dt))
+        d = 1 / u
+        b = r - q
+        p = (np.exp(b * dt) - d) / (u - d)
+        p = np.clip(p, 0, 1)
+        df = np.exp(-r * dt)
+
+        # build stock tree only once
+        stock_tree = np.zeros((N + 1, N + 1))
+        stock_tree[0, 0] = S
+        for j in range(1, N + 1):
+            stock_tree[0:j, j] = stock_tree[0:j, j - 1] * u
+            stock_tree[j, j] = stock_tree[j - 1, j - 1] * d
+
+        # option value tree
+        option_tree = np.zeros_like(stock_tree)
+        z = 1 if option_type == "call" else -1
+
+        # terminal payoffs
+        option_tree[:, N] = np.maximum(z * (stock_tree[:, N] - X), 0.0)
+
+        # backward induction
+        for j in range(N - 1, -1, -1):
+            for i in range(j + 1):
+                cont = df * (p * option_tree[i, j + 1] + (1 - p) * option_tree[i + 1, j + 1])
+                if american:
+                    intrinsic = max(z * (stock_tree[i, j] - X), 0.0)
+                    option_tree[i, j] = max(cont, intrinsic)
+                else:
+                    option_tree[i, j] = cont
+        return option_tree[0, 0]
+
+    # --- Greek calculations ---
     def price(self):
         return self._price()
 
     def delta(self):
         h = self.rel_bump_S
-        Su = self.S * (1.0 + h)
-        Sd = self.S * (1.0 - h)
+        Su, Sd = self.S * (1 + h), self.S * (1 - h)
         Vu = self._price(S=Su)
         Vd = self._price(S=Sd)
         return (Vu - Vd) / (Su - Sd)
 
     def gamma(self):
         h = self.rel_bump_S
-        Su = self.S * (1.0 + h)
-        Sd = self.S * (1.0 - h)
+        Su, Sd = self.S * (1 + h), self.S * (1 - h)
         Vu = self._price(S=Su)
         V0 = self._price()
         Vd = self._price(S=Sd)
-        return (Vu - 2.0 * V0 + Vd) / ((self.S * h) ** 2)
+        return (Vu - 2 * V0 + Vd) / ((self.S * h) ** 2)
 
     def vega(self):
         eps = self.abs_bump_sigma
-        sig_u = max(self.sigma + eps, 1e-12)
-        sig_d = max(self.sigma - eps, 1e-12)
-        Vsig_u = self._price(sigma=sig_u)
-        Vsig_d = self._price(sigma=sig_d)
-        return (Vsig_u - Vsig_d) / (2.0 * eps)
+        Vu = self._price(sigma=self.sigma + eps)
+        Vd = self._price(sigma=self.sigma - eps)
+        return (Vu - Vd) / (2 * eps)
 
     def rho(self):
         eps = self.abs_bump_r
-        Vru = self._price(r=self.r + eps)
-        Vrd = self._price(r=self.r - eps)
-        return (Vru - Vrd) / (2.0 * eps)
+        Vu = self._price(r=self.r + eps)
+        Vd = self._price(r=self.r - eps)
+        return (Vu - Vd) / (2 * eps)
 
     def theta(self):
-        # Backward difference in time
+        # use smaller backward time step for smoother theta
         dt_tree = self.T / max(self.N, 1)
-        dt = max(dt_tree, 1.0 / 365.0)
+        dt = max(dt_tree / 2, 1 / 730)  # half step or ~0.5 days
         T_next = max(self.T - dt, np.finfo(float).eps)
         V_next = self._price(T=T_next)
         V0 = self._price()
