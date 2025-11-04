@@ -328,19 +328,10 @@ class binomial_greeks:
 
     def rho(self, mode="carry", per_percent=False):
         eps = max(self.abs_bump_r, 1e-6)
-        if mode == "riskfree":
-            Vu = self._price(r=self.r + eps)
-            Vd = self._price(r=self.r - eps)
-            val = (Vu - Vd) / (2.0 * eps)
-        elif mode == "carry":
-            Vu = compute_binomial_price(self.S, self.X, self.T, self.r, self.sigma, self.N,
-                                        option_type=self.option_type, q=self.q - eps, american=self.american)
-            Vd = compute_binomial_price(self.S, self.X, self.T, self.r, self.sigma, self.N,
-                                        option_type=self.option_type, q=self.q + eps, american=self.american)
-            val = (Vu - Vd) / (2.0 * eps)
-        else:
-            raise ValueError("rho mode must be 'riskfree' or 'carry'")
-        return val / 100.0 if per_percent else val
+        Vu = self._price(r=self.r + eps)
+        Vd = self._price(r=self.r - eps)
+        rho_val = (Vu - Vd) / (2 * eps)
+        return rho_val
 
     def theta(self, convention="market_neg"):
         """
