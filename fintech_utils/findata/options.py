@@ -327,46 +327,11 @@ class binomial_greeks:
         return (Vu - Vd) / (2 * eps)
 
     def rho(self):
-        """
-        Carry rho (European): ∂V/∂b where b = r - q, discount held fixed.
-        Returned per +1% change in b (divide by 100 at the end).
-        This aligns with many course CSVs where 'Rho' is actually carry sensitivity.
-        """
-        S, X, T, r, q, sigma, N = self.S, self.X, self.T, self.r, self.q, self.sigma, self.N
-        dt = T / N
-        u = np.exp(sigma * np.sqrt(dt))
-        d = 1.0 / u
-        b = r - q
-        p = (np.exp(b * dt) - d) / (u - d)
-        p = np.clip(p, 0.0, 1.0)
-        df = np.exp(-r * dt)  # held constant w.r.t. b in carry rho
-
-        # derivative of p w.r.t. b (carry)
-        dp_db = (dt * np.exp(b * dt)) / (u - d)
-
-        # stock tree
-        S_tree = np.zeros((N + 1, N + 1))
-        S_tree[0, 0] = S
-        for j in range(1, N + 1):
-            S_tree[0:j, j] = S_tree[0:j, j - 1] * u
-            S_tree[j, j] = S_tree[j - 1, j - 1] * d
-
-        # value and carry-rho trees (European: no early exercise)
-        V = np.zeros_like(S_tree)
-        Rb = np.zeros_like(S_tree)  # dV/db
-        z = 1 if self.option_type == "call" else -1
-        V[:, N] = np.maximum(z * (S_tree[:, N] - X), 0.0)
-
-        for j in range(N - 1, -1, -1):
-            for i in range(j + 1):
-                cont = p * V[i, j + 1] + (1 - p) * V[i + 1, j + 1]
-                # derivative of continuation w.r.t. b (discount fixed)
-                dcont_db = dp_db * (V[i, j + 1] - V[i + 1, j + 1]) + p * Rb[i, j + 1] + (1 - p) * Rb[i + 1, j + 1]
-                V[i, j]  = df * cont
-                Rb[i, j] = df * dcont_db
-
-        # per 1% change in b
-        return Rb[0, 0] / 100.0
+        d1 = (np.log(self.S / self.X) + (self.r - self.q + 0.5 * self.sigma ** 2) * self.T) / (self.sigma * np.sqrt(self.T))
+        if self.option_type == "call":
+            return self.S * self.T * np.exp(-self.q * self.T) * norm.cdf(self.d1)
+        elif self.option_type == "put":
+            return -self.S * self.T * np.exp(-self.q * self.T) * norm.cdf(-self.d1)
 
     def theta(self, convention="market_neg"):
         """
