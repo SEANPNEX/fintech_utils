@@ -329,9 +329,9 @@ class binomial_greeks:
     def rho(self):
         d1 = (np.log(self.S / self.X) + (self.r - self.q + 0.5 * self.sigma ** 2) * self.T) / (self.sigma * np.sqrt(self.T))
         if self.option_type == "call":
-            return self.S * self.T * np.exp(-self.q * self.T) * norm.cdf(self.d1)
+            return self.S * self.T * np.exp(-self.q * self.T) * norm.cdf(d1)
         elif self.option_type == "put":
-            return -self.S * self.T * np.exp(-self.q * self.T) * norm.cdf(-self.d1)
+            return -self.S * self.T * np.exp(-self.q * self.T) * norm.cdf(-d1)
 
     def theta(self, convention="market_neg"):
         """
