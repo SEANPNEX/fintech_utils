@@ -215,6 +215,45 @@ class binomial_greeks:
         self.rel_bump_S = rel_bump_S
         self.abs_bump_sigma = abs_bump_sigma
         self.abs_bump_r = abs_bump_r
+    
+    def _build_trees(self, S=None, X=None, T=None, r=None, sigma=None):
+        S = self.S if S is None else S
+        X = self.X if X is None else X
+        T = self.T if T is None else T
+        r = self.r if r is None else r
+        sigma = self.sigma if sigma is None else sigma
+        q = self.q
+        N = self.N
+
+        dt = T / N
+        u = np.exp(sigma * np.sqrt(dt))
+        d = 1.0 / u
+        b = r - q
+        p = (np.exp(b * dt) - d) / (u - d)
+        p = np.clip(p, 0.0, 1.0)
+        df = np.exp(-r * dt)
+
+        # Stock tree
+        S_tree = np.zeros((N + 1, N + 1))
+        S_tree[0, 0] = S
+        for j in range(1, N + 1):
+            S_tree[0:j, j] = S_tree[0:j, j - 1] * u
+            S_tree[j, j] = S_tree[j - 1, j - 1] * d
+
+        # Option tree with early exercise
+        V = np.zeros_like(S_tree)
+        z = 1 if self.option_type == "call" else -1
+        V[:, N] = np.maximum(z * (S_tree[:, N] - X), 0.0)
+        for j in range(N - 1, -1, -1):
+            for i in range(j + 1):
+                cont = df * (p * V[i, j + 1] + (1 - p) * V[i + 1, j + 1])
+                if self.american:
+                    intrinsic = max(z * (S_tree[i, j] - X), 0.0)
+                    V[i, j] = max(cont, intrinsic)
+                else:
+                    V[i, j] = cont
+
+        return dt, S_tree, V
 
     # --- internal helper: shared stock tree ---
     def _price(self, S=None, X=None, T=None, r=None, sigma=None):
@@ -267,19 +306,19 @@ class binomial_greeks:
         return self._price()
 
     def delta(self):
-        h = self.rel_bump_S
-        Su, Sd = self.S * (1 + h), self.S * (1 - h)
-        Vu = self._price(S=Su)
-        Vd = self._price(S=Sd)
-        return (Vu - Vd) / (Su - Sd)
+        dt, S_tree, V = self._build_trees()
+        S_up = S_tree[0, 1]
+        S_dn = S_tree[1, 1]
+        return (V[0, 1] - V[1, 1]) / (S_up - S_dn)
 
     def gamma(self):
-        h = self.rel_bump_S
-        Su, Sd = self.S * (1 + h), self.S * (1 - h)
-        Vu = self._price(S=Su)
-        V0 = self._price()
-        Vd = self._price(S=Sd)
-        return (Vu - 2 * V0 + Vd) / ((self.S * h) ** 2)
+        dt, S_tree, V = self._build_trees()
+        Vuu, Vud, Vdd = V[0, 2], V[1, 2], V[2, 2]
+        S_uu, S_ud, S_dd = S_tree[0, 2], S_tree[1, 2], S_tree[2, 2]
+        delta_up = (Vuu - Vud) / (S_uu - S_ud)
+        delta_dn = (Vud - Vdd) / (S_ud - S_dd)
+        hS = 0.5 * (S_uu - S_dd)
+        return (delta_up - delta_dn) / hS
 
     def vega(self):
         eps = self.abs_bump_sigma
@@ -287,17 +326,22 @@ class binomial_greeks:
         Vd = self._price(sigma=self.sigma - eps)
         return (Vu - Vd) / (2 * eps)
 
-    def rho(self):
-        eps = self.abs_bump_r
-        Vu = self._price(r=self.r + eps)
-        Vd = self._price(r=self.r - eps)
-        return (Vu - Vd) / (2 * eps)
+    def rho(self, mode="carry"):
+        eps = max(self.abs_bump_r, 1e-6)
+        if mode == "riskfree":
+            Vu = self._price(r=self.r + eps)
+            Vd = self._price(r=self.r - eps)
+            return (Vu - Vd) / (2.0 * eps)
+        elif mode == "carry":
+            # bump cost of carry b=r-q while keeping discount at original r
+            Vu = compute_binomial_price(self.S, self.X, self.T, self.r, self.sigma, self.N,
+                                        option_type=self.option_type, q=self.q - eps, american=self.american)
+            Vd = compute_binomial_price(self.S, self.X, self.T, self.r, self.sigma, self.N,
+                                        option_type=self.option_type, q=self.q + eps, american=self.american)
+            return (Vu - Vd) / (2.0 * eps)
+        else:
+            raise ValueError("rho mode must be 'riskfree' or 'carry'")
 
     def theta(self):
-        # use smaller backward time step for smoother theta
-        dt_tree = self.T / max(self.N, 1)
-        dt = max(dt_tree / 2, 1 / 730)  # half step or ~0.5 days
-        T_next = max(self.T - dt, np.finfo(float).eps)
-        V_next = self._price(T=T_next)
-        V0 = self._price()
-        return (V_next - V0) / (-dt)
+        dt, S_tree, V = self._build_trees()
+        return (V[0, 1] - V[0, 0]) / dt
