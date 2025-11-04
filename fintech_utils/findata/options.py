@@ -326,30 +326,63 @@ class binomial_greeks:
         Vd = self._price(sigma=self.sigma - eps)
         return (Vu - Vd) / (2 * eps)
 
-    def rho(self, mode="riskfree", per_percent=False):
+    def rho(self):
         """
-        Rho via bumps.
-        mode:
-          - "riskfree": ∂V/∂r (discount and b=r-q both change)
-          - "carry":    ∂V/∂b holding discount at original r (implemented by bumping q with opposite sign)
-        per_percent:
-          If True, scale sensitivity per +1% change in the bumped rate (divide by 100).
+        Analytic binomial rho (∂V/∂r) with early exercise:
+        Propagate derivative through the tree; at exercised nodes, derivative is 0.
+        Returned value is per *unit* change in r.
         """
-        eps = max(self.abs_bump_r, 1e-6)
-        if mode == "riskfree":
-            Vu = self._price(r=self.r + eps)
-            Vd = self._price(r=self.r - eps)
-            val = (Vu - Vd) / (2.0 * eps)
-        elif mode == "carry":
-            # bump cost of carry b by ±eps while keeping discount at original r
-            Vu = compute_binomial_price(self.S, self.X, self.T, self.r, self.sigma, self.N,
-                                        option_type=self.option_type, q=self.q - eps, american=self.american)
-            Vd = compute_binomial_price(self.S, self.X, self.T, self.r, self.sigma, self.N,
-                                        option_type=self.option_type, q=self.q + eps, american=self.american)
-            val = (Vu - Vd) / (2.0 * eps)
-        else:
-            raise ValueError("rho mode must be 'riskfree' or 'carry'")
-        return val / 100.0 if per_percent else val
+        # Build core quantities
+        S, X, T, r, q, sigma, N = self.S, self.X, self.T, self.r, self.q, self.sigma, self.N
+        dt = T / N
+        u = np.exp(sigma * np.sqrt(dt))
+        d = 1.0 / u
+        b = r - q
+        p = (np.exp(b * dt) - d) / (u - d)
+        p = np.clip(p, 0.0, 1.0)
+        df = np.exp(-r * dt)
+
+        # Derivatives of p and df w.r.t r
+        dp_dr = (dt * np.exp(b * dt)) / (u - d)
+        ddf_dr = -dt * df
+
+        # Stock tree
+        S_tree = np.zeros((N + 1, N + 1))
+        S_tree[0, 0] = S
+        for j in range(1, N + 1):
+            S_tree[0:j, j] = S_tree[0:j, j - 1] * u
+            S_tree[j, j] = S_tree[j - 1, j - 1] * d
+
+        # Option value and rho trees
+        V = np.zeros_like(S_tree)
+        R = np.zeros_like(S_tree)  # dV/dr
+        z = 1 if self.option_type == "call" else -1
+
+        # Terminal payoff (rho=0 at maturity)
+        V[:, N] = np.maximum(z * (S_tree[:, N] - X), 0.0)
+        R[:, N] = 0.0
+
+        # Backward induction with derivative propagation
+        for j in range(N - 1, -1, -1):
+            for i in range(j + 1):
+                cont = df * (p * V[i, j + 1] + (1 - p) * V[i + 1, j + 1])
+                # derivative of continuation value
+                dcont = (
+                    ddf_dr * (p * V[i, j + 1] + (1 - p) * V[i + 1, j + 1])
+                    + df * (dp_dr * (V[i, j + 1] - V[i + 1, j + 1]) + p * R[i, j + 1] + (1 - p) * R[i + 1, j + 1])
+                )
+                if self.american:
+                    intrinsic = max(z * (S_tree[i, j] - X), 0.0)
+                    if intrinsic > cont:
+                        V[i, j] = intrinsic
+                        R[i, j] = 0.0  # exercise now ⇒ no r sensitivity
+                    else:
+                        V[i, j] = cont
+                        R[i, j] = dcont
+                else:
+                    V[i, j] = cont
+                    R[i, j] = dcont
+        return R[0, 0]
 
     def theta(self, convention="market_neg"):
         """
