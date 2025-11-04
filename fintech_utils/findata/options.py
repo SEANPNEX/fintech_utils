@@ -327,14 +327,16 @@ class binomial_greeks:
         return (Vu - Vd) / (2 * eps)
 
     def rho(self):
-        b = self.r - self.q
-        d1 = (np.log(self.S / self.X) + (b + 0.5 * self.sigma ** 2) * self.T) / (self.sigma * np.sqrt(self.T))
-        # carry rho per 1%
-        if self.option_type == "call":
-            return -self.S * self.T * np.exp((b - self.r) * self.T) * norm.cdf(d1) / 100
-        elif self.option_type == "put":
-            return self.S * self.T * np.exp((b - self.r) * self.T) * norm.cdf(-d1) / 100
-
+        """
+        Rho for American option with continuous dividend yield.
+        Computed by finite differencing the binomial tree prices.
+        """
+        eps = max(self.abs_bump_r, 1e-4)  # small absolute bump in rate
+        Vu = self._price(r=self.r + eps)
+        Vd = self._price(r=self.r - eps)
+        rho_val = (Vu - Vd) / (2 * eps)
+        return rho_val
+    
     def theta(self, convention="market_neg"):
         """
         Stable node-based theta using two-step central difference.
