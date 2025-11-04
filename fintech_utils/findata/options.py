@@ -326,12 +326,30 @@ class binomial_greeks:
         Vd = self._price(sigma=self.sigma - eps)
         return (Vu - Vd) / (2 * eps)
 
-    def rho(self, mode="carry", per_percent=False):
+    def rho(self, mode="riskfree", per_percent=False):
+        """
+        Rho via bumps.
+        mode:
+          - "riskfree": ∂V/∂r (discount and b=r-q both change)
+          - "carry":    ∂V/∂b holding discount at original r (implemented by bumping q with opposite sign)
+        per_percent:
+          If True, scale sensitivity per +1% change in the bumped rate (divide by 100).
+        """
         eps = max(self.abs_bump_r, 1e-6)
-        Vu = self._price(r=self.r + eps)
-        Vd = self._price(r=self.r - eps)
-        rho_val = (Vu - Vd) / (2 * eps)
-        return rho_val
+        if mode == "riskfree":
+            Vu = self._price(r=self.r + eps)
+            Vd = self._price(r=self.r - eps)
+            val = (Vu - Vd) / (2.0 * eps)
+        elif mode == "carry":
+            # bump cost of carry b by ±eps while keeping discount at original r
+            Vu = compute_binomial_price(self.S, self.X, self.T, self.r, self.sigma, self.N,
+                                        option_type=self.option_type, q=self.q - eps, american=self.american)
+            Vd = compute_binomial_price(self.S, self.X, self.T, self.r, self.sigma, self.N,
+                                        option_type=self.option_type, q=self.q + eps, american=self.american)
+            val = (Vu - Vd) / (2.0 * eps)
+        else:
+            raise ValueError("rho mode must be 'riskfree' or 'carry'")
+        return val / 100.0 if per_percent else val
 
     def theta(self, convention="market_neg"):
         """
