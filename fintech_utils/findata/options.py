@@ -190,6 +190,88 @@ def bsm_pnl(S0, S1, X, T, r, sigma, option_type="call"):
     return option_1 - option_0
 
 
+# --- Binomial Greeks via bump-and-reprice ---
+def binomial_greeks(
+    S, X, T, r, sigma, N,
+    option_type="call", q=0.0, american=False,
+    rel_bump_S=1e-4, abs_bump_sigma=1e-4, abs_bump_r=1e-4
+):
+    """
+    Compute Greeks for the binomial option pricer (supports American/European and dividend yield q)
+    using bump-and-reprice finite differences.
+
+    Parameters
+    ----------
+    S : float
+        Spot price
+    X : float
+        Strike
+    T : float
+        Time to maturity in years
+    r : float
+        Risk-free rate (continuously compounded)
+    sigma : float
+        Volatility (per year)
+    N : int
+        Number of steps in the binomial tree
+    option_type : {"call", "put"}
+    q : float
+        Continuous dividend yield
+    american : bool
+        If True, allows early exercise (American). Otherwise European.
+    rel_bump_S : float
+        Relative bump for S used in delta/gamma
+    abs_bump_sigma : float
+        Absolute bump for sigma used in vega
+    abs_bump_r : float
+        Absolute bump for r used in rho
+
+    Returns
+    -------
+    dict with keys: price, delta, gamma, vega, rho, theta
+    """
+    # Base price
+    V0 = compute_binomial_price(S, X, T, r, sigma, N, option_type=option_type, q=q, american=american)
+
+    # --- Delta & Gamma (symmetric bumps on S) ---
+    Su = S * (1.0 + rel_bump_S)
+    Sd = S * (1.0 - rel_bump_S)
+    Vu = compute_binomial_price(Su, X, T, r, sigma, N, option_type=option_type, q=q, american=american)
+    Vd = compute_binomial_price(Sd, X, T, r, sigma, N, option_type=option_type, q=q, american=american)
+    delta = (Vu - Vd) / (Su - Sd)
+    # central second derivative w.r.t S
+    gamma = (Vu - 2.0 * V0 + Vd) / ((S * rel_bump_S) ** 2)
+
+    # --- Vega (symmetric bump on sigma) ---
+    sig_u = max(sigma + abs_bump_sigma, 1e-12)
+    sig_d = max(sigma - abs_bump_sigma, 1e-12)
+    Vsig_u = compute_binomial_price(S, X, T, r, sig_u, N, option_type=option_type, q=q, american=american)
+    Vsig_d = compute_binomial_price(S, X, T, r, sig_d, N, option_type=option_type, q=q, american=american)
+    vega = (Vsig_u - Vsig_d) / (2.0 * abs_bump_sigma)
+
+    # --- Rho (symmetric bump on r) ---
+    ru = r + abs_bump_r
+    rd = r - abs_bump_r
+    Vru = compute_binomial_price(S, X, T, ru, sigma, N, option_type=option_type, q=q, american=american)
+    Vrd = compute_binomial_price(S, X, T, rd, sigma, N, option_type=option_type, q=q, american=american)
+    rho = (Vru - Vrd) / (2.0 * abs_bump_r)
+
+    # --- Theta (backward difference in time) ---
+    # Use one time step or one day, whichever is larger, to avoid too tiny dt
+    dt = max(T / max(N, 1), 1.0 / 365.0)
+    T_next = max(T - dt, np.finfo(float).eps)
+    V_next = compute_binomial_price(S, X, T_next, r, sigma, N, option_type=option_type, q=q, american=american)
+    theta = (V_next - V0) / (-dt)
+
+    return {
+        "price": V0,
+        "delta": float(delta),
+        "gamma": float(gamma),
+        "vega": float(vega),
+        "rho": float(rho),
+        "theta": float(theta),
+    }
+
 class BinomialGreeks:
     """
     Greeks via binomial tree (supports American/European and dividend yield q)
