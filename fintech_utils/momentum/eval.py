@@ -9,11 +9,14 @@ def sharpe_ratio(returns: np.ndarray, risk_free_rate: float = 0.0) -> float:
     risk_free_rate: annual risk-free rate
     return: annualized Sharpe Ratio
     """
+    if returns.size == 0:
+        return 0.0
     excess_returns = returns - risk_free_rate / 252  # assuming daily returns
     mean_excess_return = np.mean(excess_returns)
     std_excess_return = np.std(excess_returns)
-    sharpe_ratio = (mean_excess_return / std_excess_return) * np.sqrt(252)  # annualize
-    return sharpe_ratio
+    if std_excess_return == 0:
+        return 0.0
+    return (mean_excess_return / std_excess_return) * np.sqrt(252)  # annualize
 
 def sortino_ratio(returns: np.ndarray, risk_free_rate: float = 0.0) -> float:
     """
@@ -22,12 +25,17 @@ def sortino_ratio(returns: np.ndarray, risk_free_rate: float = 0.0) -> float:
     risk_free_rate: annual risk-free rate
     return: annualized Sortino Ratio
     """
+    if returns.size == 0:
+        return 0.0
     excess_returns = returns - risk_free_rate / 252  # assuming daily returns
     mean_excess_return = np.mean(excess_returns)
     downside_returns = excess_returns[excess_returns < 0]
+    if downside_returns.size == 0:
+        return np.inf
     downside_std = np.std(downside_returns)
-    sortino_ratio = (mean_excess_return / downside_std) * np.sqrt(252)  # annualize
-    return sortino_ratio
+    if downside_std == 0:
+        return np.inf
+    return (mean_excess_return / downside_std) * np.sqrt(252)  # annualize
 
 def max_drawdown(returns: np.ndarray) -> float:
     """
@@ -35,11 +43,12 @@ def max_drawdown(returns: np.ndarray) -> float:
     returns: 1D array of periodic returns
     return: maximum drawdown as a fraction
     """
-    cumulative_returns = np.cumprod(1 + returns) - 1
-    peak = np.maximum.accumulate(cumulative_returns)
-    drawdowns = (cumulative_returns - peak) / peak
-    max_drawdown = np.min(drawdowns)
-    return max_drawdown
+    if returns.size == 0:
+        return 0.0
+    wealth = np.concatenate(([1.0], np.cumprod(1 + returns, dtype=float)))
+    peak = np.maximum.accumulate(wealth)
+    drawdowns = wealth / peak - 1.0
+    return float(np.min(drawdowns))
 
 def calmar_ratio(returns: np.ndarray) -> float:
     """
@@ -47,10 +56,13 @@ def calmar_ratio(returns: np.ndarray) -> float:
     returns: 1D array of periodic returns
     return: Calmar Ratio
     """
-    annual_return = (1 + np.mean(returns)) ** 252 - 1  # annualize
+    if returns.size == 0:
+        return 0.0
+    annual_return = cagr(returns)
     max_dd = abs(max_drawdown(returns))
-    calmar_ratio = annual_return / max_dd if max_dd != 0 else np.inf
-    return calmar_ratio
+    if max_dd == 0:
+        return np.inf
+    return annual_return / max_dd
 
 def annualized_volatility(returns: np.ndarray) -> float:
     """
@@ -58,9 +70,10 @@ def annualized_volatility(returns: np.ndarray) -> float:
     returns: 1D array of periodic returns
     return: annualized volatility
     """
+    if returns.size == 0:
+        return 0.0
     daily_vol = np.std(returns)
-    annual_vol = daily_vol * np.sqrt(252)  # annualize
-    return annual_vol
+    return daily_vol * np.sqrt(252)  # annualize
 
 def information_ratio(returns: np.ndarray, benchmark_returns: np.ndarray) -> float:
     """
@@ -69,11 +82,14 @@ def information_ratio(returns: np.ndarray, benchmark_returns: np.ndarray) -> flo
     benchmark_returns: 1D array of benchmark periodic returns
     return: Information Ratio
     """
+    if returns.size == 0 or benchmark_returns.size == 0:
+        return 0.0
     active_returns = returns - benchmark_returns
     mean_active_return = np.mean(active_returns)
     std_active_return = np.std(active_returns)
-    information_ratio = (mean_active_return / std_active_return) * np.sqrt(252)  # annualize
-    return information_ratio
+    if std_active_return == 0:
+        return np.inf if mean_active_return > 0 else 0.0
+    return (mean_active_return / std_active_return) * np.sqrt(252)  # annualize
 
 def omega_ratio(returns: np.ndarray, threshold: float = 0.0) -> float:
     """
@@ -107,7 +123,62 @@ def cagr(returns: np.ndarray, periods_per_year: int = 252) -> float:
     return: CAGR
     """
     total_periods = len(returns)
+    if total_periods == 0:
+        return 0.0
     cumulative_return = np.prod(1 + returns) - 1
     cagr = (1 + cumulative_return) ** (periods_per_year / total_periods) - 1
     return cagr
 
+def worst_drawdown(returns: np.ndarray) -> float:
+    """
+    Calculate the worst drawdown of a return series.
+    returns: 1D array of periodic returns
+    return: worst drawdown as a fraction
+    """
+    return max_drawdown(returns)
+
+def worst_month_return(returns: np.ndarray) -> float:
+    """
+    Calculate the worst monthly return of a return series.
+    returns: 1D array of periodic returns
+    return: worst monthly return as a fraction
+    """
+    monthly_returns = []
+    for i in range(0, len(returns), 21):  # assuming ~21 trading days per month
+        month_return = np.prod(1 + returns[i:i+21]) - 1
+        monthly_returns.append(month_return)
+    if not monthly_returns:
+        return 0.0
+    return float(np.min(monthly_returns))
+
+def best_month_return(returns: np.ndarray) -> float:
+    """
+    Calculate the best monthly return of a return series.
+    returns: 1D array of periodic returns
+    return: best monthly return as a fraction
+    """
+    monthly_returns = []
+    for i in range(0, len(returns), 21):  # assuming ~21 trading days per month
+        month_return = np.prod(1 + returns[i:i+21]) - 1
+        monthly_returns.append(month_return)
+    if not monthly_returns:
+        return 0.0
+    return float(np.max(monthly_returns))
+
+def profitable_month_ratio(returns: np.ndarray) -> float:
+    """
+    Calculate the ratio of profitable months in a return series.
+    returns: 1D array of periodic returns
+    return: ratio of profitable months
+    """
+    if returns.size == 0:
+        return 0.0
+    profitable_months = 0
+    total_months = 0
+    for i in range(0, len(returns), 21):  # assuming ~21 trading days per month
+        month_return = np.prod(1 + returns[i:i+21]) - 1
+        if month_return > 0:
+            profitable_months += 1
+        total_months += 1
+    ratio = profitable_months / total_months if total_months > 0 else 0.0
+    return ratio

@@ -72,4 +72,8 @@ def mape(y_true, y_pred):
         return: MAPE value
     """
     y_true, y_pred = np.array(y_true), np.array(y_pred)
-    return np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+    denom_mask = np.abs(y_true) > np.finfo(float).eps
+    if not np.any(denom_mask):
+        return np.inf
+    percentage_errors = np.abs((y_true[denom_mask] - y_pred[denom_mask]) / y_true[denom_mask])
+    return np.mean(percentage_errors) * 100
