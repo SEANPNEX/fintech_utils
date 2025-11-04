@@ -328,9 +328,9 @@ class binomial_greeks:
 
     def rho(self):
         """
-        European-style rho (∂V/∂r) computed on a no-early-exercise tree,
-        returned per +1% change in r (i.e., divide by 100).
-        This matches common CSV/lecture conventions better than American rho.
+        Carry rho (European): ∂V/∂b where b = r - q, discount held fixed.
+        Returned per +1% change in b (divide by 100 at the end).
+        This aligns with many course CSVs where 'Rho' is actually carry sensitivity.
         """
         S, X, T, r, q, sigma, N = self.S, self.X, self.T, self.r, self.q, self.sigma, self.N
         dt = T / N
@@ -339,38 +339,35 @@ class binomial_greeks:
         b = r - q
         p = (np.exp(b * dt) - d) / (u - d)
         p = np.clip(p, 0.0, 1.0)
-        df = np.exp(-r * dt)
+        df = np.exp(-r * dt)  # held constant w.r.t. b in carry rho
 
-        # derivatives wrt r
-        dp_dr  = (dt * np.exp(b * dt)) / (u - d)     # from p = (e^{b dt}-d)/(u-d)
-        ddf_dr = -dt * df                             # from df = e^{-r dt}
+        # derivative of p w.r.t. b (carry)
+        dp_db = (dt * np.exp(b * dt)) / (u - d)
 
         # stock tree
-        S_tree = np.zeros((N+1, N+1))
-        S_tree[0,0] = S
-        for j in range(1, N+1):
-            S_tree[0:j, j] = S_tree[0:j, j-1] * u
-            S_tree[j,   j] = S_tree[j-1, j-1] * d
+        S_tree = np.zeros((N + 1, N + 1))
+        S_tree[0, 0] = S
+        for j in range(1, N + 1):
+            S_tree[0:j, j] = S_tree[0:j, j - 1] * u
+            S_tree[j, j] = S_tree[j - 1, j - 1] * d
 
-        # value & rho trees (European: no early exercise)
+        # value and carry-rho trees (European: no early exercise)
         V = np.zeros_like(S_tree)
-        R = np.zeros_like(S_tree)  # dV/dr
+        Rb = np.zeros_like(S_tree)  # dV/db
         z = 1 if self.option_type == "call" else -1
         V[:, N] = np.maximum(z * (S_tree[:, N] - X), 0.0)
-        # rho at maturity is 0
-        for j in range(N-1, -1, -1):
-            for i in range(j+1):
-                cont = p*V[i, j+1] + (1-p)*V[i+1, j+1]
-                V[i, j] = df * cont
-                # derivative of continuation value
-                R[i, j] = (
-                    ddf_dr * cont +
-                    df * (dp_dr * (V[i, j+1] - V[i+1, j+1]) + p*R[i, j+1] + (1-p)*R[i+1, j+1])
-                )
 
-        # return per 1% change in r (divide by 100)
-        return R[0, 0] / 100.0
-    
+        for j in range(N - 1, -1, -1):
+            for i in range(j + 1):
+                cont = p * V[i, j + 1] + (1 - p) * V[i + 1, j + 1]
+                # derivative of continuation w.r.t. b (discount fixed)
+                dcont_db = dp_db * (V[i, j + 1] - V[i + 1, j + 1]) + p * Rb[i, j + 1] + (1 - p) * Rb[i + 1, j + 1]
+                V[i, j]  = df * cont
+                Rb[i, j] = df * dcont_db
+
+        # per 1% change in b
+        return Rb[0, 0] / 100.0
+
     def theta(self, convention="market_neg"):
         """
         Stable node-based theta using two-step central difference.
