@@ -138,7 +138,7 @@ def bsm(S, X, T, r, sigma, option_type="call"):
     """
     Black-Scholes-Merton option pricing formula.
     """
-    d1 = (np.log(S / X) + (r + 0.5 * sigma ** 2))/(sigma * np.sqrt(T))
+    d1 = (np.log(S / X) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2= d1 - sigma * np.sqrt(T)
     if option_type == "call":
         return S * norm.cdf(d1) - X * np.exp(-r * T) * norm.cdf(d2)
@@ -152,7 +152,7 @@ def bsm_iv(price, S, X, T, r, option_type="call", tol=1e-6, max_iterations=100):
     sigma = 0.2 
     for i in range(max_iterations):
         price_estimate = bsm(S, X, T, r, sigma, option_type)
-        vega = S * norm.pdf((np.log(S / X) + (r + 0.5 * sigma ** 2))/(sigma * np.sqrt(T))) * np.sqrt(T)
+        vega = S * norm.pdf((np.log(S / X) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))) * np.sqrt(T)
         price_diff = price - price_estimate
         if abs(price_diff) < tol:
             return sigma
@@ -179,7 +179,7 @@ class bsm_greeks:
         self.r = r
         self.sigma = sigma
         self.option_type = option_type
-        self.d1 = (np.log(S / X) + (r + 0.5 * sigma ** 2))/(sigma * np.sqrt(T))
+        self.d1 = (np.log(S / X) + (r + 0.5 * sigma ** 2) * T)/(sigma * np.sqrt(T))
         self.d2= self.d1 - sigma * np.sqrt(T)
 
     def delta(self):
