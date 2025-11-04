@@ -188,3 +188,91 @@ def bsm_pnl(S0, S1, X, T, r, sigma, option_type="call"):
     next_T = max(T - (1 / 365), np.finfo(float).eps)
     option_1 = bsm(S1, X, next_T, r, sigma, option_type)  # Assuming 1 day has passed
     return option_1 - option_0
+
+
+class BinomialGreeks:
+    """
+    Greeks via binomial tree (supports American/European and dividend yield q)
+    using bump-and-reprice finite differences.
+
+    Usage mirrors `bsm_greeks`:
+        g = BinomialGreeks(S, X, T, r, sigma, N, option_type="call", q=0.0, american=False)
+        g.price(); g.delta(); g.gamma(); g.vega(); g.rho(); g.theta()
+    """
+    def __init__(
+        self,
+        S, X, T, r, sigma, N,
+        option_type="call", q=0.0, american=False,
+        rel_bump_S=1e-4, abs_bump_sigma=1e-4, abs_bump_r=1e-4
+    ):
+        self.S = float(S)
+        self.X = float(X)
+        self.T = float(T)
+        self.r = float(r)
+        self.sigma = float(sigma)
+        self.N = int(N)
+        self.option_type = option_type
+        self.q = float(q)
+        self.american = bool(american)
+        # bump params
+        self.rel_bump_S = float(rel_bump_S)
+        self.abs_bump_sigma = float(abs_bump_sigma)
+        self.abs_bump_r = float(abs_bump_r)
+
+    # ---- helpers ----
+    def _price(self, S=None, X=None, T=None, r=None, sigma=None):
+        return compute_binomial_price(
+            S if S is not None else self.S,
+            X if X is not None else self.X,
+            T if T is not None else self.T,
+            r if r is not None else self.r,
+            sigma if sigma is not None else self.sigma,
+            self.N,
+            option_type=self.option_type,
+            q=self.q,
+            american=self.american,
+        )
+
+    # ---- greek methods ----
+    def price(self):
+        return self._price()
+
+    def delta(self):
+        h = self.rel_bump_S
+        Su = self.S * (1.0 + h)
+        Sd = self.S * (1.0 - h)
+        Vu = self._price(S=Su)
+        Vd = self._price(S=Sd)
+        return (Vu - Vd) / (Su - Sd)
+
+    def gamma(self):
+        h = self.rel_bump_S
+        Su = self.S * (1.0 + h)
+        Sd = self.S * (1.0 - h)
+        Vu = self._price(S=Su)
+        V0 = self._price()
+        Vd = self._price(S=Sd)
+        return (Vu - 2.0 * V0 + Vd) / ((self.S * h) ** 2)
+
+    def vega(self):
+        eps = self.abs_bump_sigma
+        sig_u = max(self.sigma + eps, 1e-12)
+        sig_d = max(self.sigma - eps, 1e-12)
+        Vsig_u = self._price(sigma=sig_u)
+        Vsig_d = self._price(sigma=sig_d)
+        return (Vsig_u - Vsig_d) / (2.0 * eps)
+
+    def rho(self):
+        eps = self.abs_bump_r
+        Vru = self._price(r=self.r + eps)
+        Vrd = self._price(r=self.r - eps)
+        return (Vru - Vrd) / (2.0 * eps)
+
+    def theta(self):
+        # Backward difference in time
+        dt_tree = self.T / max(self.N, 1)
+        dt = max(dt_tree, 1.0 / 365.0)
+        T_next = max(self.T - dt, np.finfo(float).eps)
+        V_next = self._price(T=T_next)
+        V0 = self._price()
+        return (V_next - V0) / (-dt)
