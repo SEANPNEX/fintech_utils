@@ -326,22 +326,31 @@ class binomial_greeks:
         Vd = self._price(sigma=self.sigma - eps)
         return (Vu - Vd) / (2 * eps)
 
-    def rho(self, mode="carry"):
+    def rho(self, mode="carry", per_percent=False):
         eps = max(self.abs_bump_r, 1e-6)
         if mode == "riskfree":
             Vu = self._price(r=self.r + eps)
             Vd = self._price(r=self.r - eps)
-            return (Vu - Vd) / (2.0 * eps)
+            val = (Vu - Vd) / (2.0 * eps)
         elif mode == "carry":
-            # bump cost of carry b=r-q while keeping discount at original r
             Vu = compute_binomial_price(self.S, self.X, self.T, self.r, self.sigma, self.N,
                                         option_type=self.option_type, q=self.q - eps, american=self.american)
             Vd = compute_binomial_price(self.S, self.X, self.T, self.r, self.sigma, self.N,
                                         option_type=self.option_type, q=self.q + eps, american=self.american)
-            return (Vu - Vd) / (2.0 * eps)
+            val = (Vu - Vd) / (2.0 * eps)
         else:
             raise ValueError("rho mode must be 'riskfree' or 'carry'")
+        return val / 100.0 if per_percent else val
 
-    def theta(self):
+    def theta(self, convention="market_neg"):
+        """
+        Stable node-based theta using two-step central difference.
+        convention: 'math' (signed), 'market_neg' (-theta), 'abs' (absolute)
+        """
         dt, S_tree, V = self._build_trees()
-        return (V[0, 1] - V[0, 0]) / dt
+        theta_val = (V[1, 2] - V[0, 0]) / (2.0 * dt)
+        if convention == "market_neg":
+            return -theta_val
+        elif convention == "abs":
+            return abs(theta_val)
+        return theta_val
