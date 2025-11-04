@@ -3,7 +3,7 @@ from scipy.stats import norm
 from typing import List
 
 class BinomialTreeOption:
-    def __init__(self, df_spy, X, r, N, date_trade, date_expiry, option_type="call"):
+    def __init__(self, df_spy, X, r, N, date_trade, date_expiry, option_type="call", q=0.0):
         """
         Initialize the Binomial Tree for option pricing with stage-specific volatility.
         """
@@ -13,6 +13,7 @@ class BinomialTreeOption:
         self.X = X
         self.T = (date_expiry - date_trade).days / 365  # Convert days to years
         self.r = r
+        self.q = q
         self.N = N
         self.option_type = option_type
         self.dt = self.T / N  # Time step size
@@ -102,7 +103,7 @@ class BinomialTreeOption:
             if np.isclose(u, d):
                 p = 0.5
             else:
-                p = (np.exp(self.r * self.dt) - d) / (u - d)
+                p = (np.exp((self.r - self.q) * self.dt) - d) / (u - d)
                 p = np.clip(p, 0.0, 1.0)
             for j in range(i + 1):
                 option_tree[j, i] = np.exp(-self.r * self.dt) * (
@@ -118,7 +119,7 @@ class BinomialTreeOption:
         option_tree = self.build_option_tree()
         return option_tree[0, 0]
 
-def compute_binomial_price(row, df_spy, r, N, date_trade, option_type="call"):
+def compute_binomial_price(row, df_spy, r, N, date_trade, option_type="call", q=0.0):
     """
         Compute the binomial tree option price for a given option row
         row: DataFrame row with option data
@@ -131,28 +132,28 @@ def compute_binomial_price(row, df_spy, r, N, date_trade, option_type="call"):
     X = row["strike"]
     expiration = row["expiration"]
     # set to global T
-    option = BinomialTreeOption(df_spy, X, r, N, date_trade=date_trade, date_expiry=expiration, option_type=option_type)
+    option = BinomialTreeOption(df_spy, X, r, N, date_trade=date_trade, date_expiry=expiration, option_type=option_type, q=q)
     return option.price()
 
-def bsm(S, X, T, r, sigma, option_type="call"):
+def bsm(S, X, T, r, sigma, option_type="call", q=0.0):
     """
     Black-Scholes-Merton option pricing formula.
     """
-    d1 = (np.log(S / X) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    d2= d1 - sigma * np.sqrt(T)
+    d1 = (np.log(S / X) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
     if option_type == "call":
-        return S * norm.cdf(d1) - X * np.exp(-r * T) * norm.cdf(d2)
+        return S * np.exp(-q * T) * norm.cdf(d1) - X * np.exp(-r * T) * norm.cdf(d2)
     elif option_type == "put":
-        return X * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+        return X * np.exp(-r * T) * norm.cdf(-d2) - S * np.exp(-q * T) * norm.cdf(-d1)
 
-def bsm_iv(price, S, X, T, r, option_type="call", tol=1e-6, max_iterations=100):
+def bsm_iv(price, S, X, T, r, option_type="call", tol=1e-6, max_iterations=100, q=0.0):
     """
     Implied volatility calculation using the Black-Scholes-Merton model.
     """
     sigma = 0.2 
     for i in range(max_iterations):
-        price_estimate = bsm(S, X, T, r, sigma, option_type)
-        vega = S * norm.pdf((np.log(S / X) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))) * np.sqrt(T)
+        price_estimate = bsm(S, X, T, r, sigma, option_type, q=q)
+        vega = S * np.exp(-q * T) * norm.pdf((np.log(S / X) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))) * np.sqrt(T)
         price_diff = price - price_estimate
         if abs(price_diff) < tol:
             return sigma
@@ -172,35 +173,38 @@ def bsm_american_approx(S, X, T, r, sigma, option_type="call"):
         return bsm_price + early_exercise_premium
     
 class bsm_greeks:
-    def __init__(self, S, X, T, r, sigma, option_type="call"):
+    def __init__(self, S, X, T, r, sigma, option_type="call", q=0.0):
         self.S = S
         self.X = X
         self.T = T
         self.r = r
         self.sigma = sigma
         self.option_type = option_type
-        self.d1 = (np.log(S / X) + (r + 0.5 * sigma ** 2) * T)/(sigma * np.sqrt(T))
-        self.d2= self.d1 - sigma * np.sqrt(T)
+        self.q = q
+        self.d1 = (np.log(S / X) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        self.d2 = self.d1 - sigma * np.sqrt(T)
 
     def delta(self):
         if self.option_type == "call":
-            return norm.cdf(self.d1)
+            return np.exp(-self.q * self.T) * norm.cdf(self.d1)
         elif self.option_type == "put":
-            return norm.cdf(self.d1) - 1
+            return np.exp(-self.q * self.T) * (norm.cdf(self.d1) - 1)
 
     def gamma(self):
-        return norm.pdf(self.d1) / (self.S * self.sigma * np.sqrt(self.T))
+        return np.exp(-self.q * self.T) * norm.pdf(self.d1) / (self.S * self.sigma * np.sqrt(self.T))
 
     def theta(self):
         if self.option_type == "call":
-            return (- (self.S * norm.pdf(self.d1) * self.sigma) / (2 * np.sqrt(self.T)) 
-                    - self.r * self.X * np.exp(-self.r * self.T) * norm.cdf(self.d2))
+            return (-(self.S * np.exp(-self.q * self.T) * norm.pdf(self.d1) * self.sigma) / (2 * np.sqrt(self.T))
+                    - self.r * self.X * np.exp(-self.r * self.T) * norm.cdf(self.d2)
+                    + self.q * self.S * np.exp(-self.q * self.T) * norm.cdf(self.d1))
         elif self.option_type == "put":
-            return (- (self.S * norm.pdf(self.d1) * self.sigma) / (2 * np.sqrt(self.T)) 
-                    + self.r * self.X * np.exp(-self.r * self.T) * norm.cdf(-self.d2))
+            return (-(self.S * np.exp(-self.q * self.T) * norm.pdf(self.d1) * self.sigma) / (2 * np.sqrt(self.T))
+                    + self.r * self.X * np.exp(-self.r * self.T) * norm.cdf(-self.d2)
+                    - self.q * self.S * np.exp(-self.q * self.T) * norm.cdf(-self.d1))
 
     def vega(self):
-        return self.S * norm.pdf(self.d1) * np.sqrt(self.T)
+        return self.S * np.exp(-self.q * self.T) * norm.pdf(self.d1) * np.sqrt(self.T)
 
     def rho(self):
         if self.option_type == "call":
