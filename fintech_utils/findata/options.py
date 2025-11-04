@@ -327,11 +327,50 @@ class binomial_greeks:
         return (Vu - Vd) / (2 * eps)
 
     def rho(self):
-        eps = max(self.abs_bump_r, 1e-6)
-        Vu = self._price(r=self.r + eps)
-        rho_val = (Vu - self.price()) / (eps)
-        return rho_val
+        """
+        European-style rho (∂V/∂r) computed on a no-early-exercise tree,
+        returned per +1% change in r (i.e., divide by 100).
+        This matches common CSV/lecture conventions better than American rho.
+        """
+        S, X, T, r, q, sigma, N = self.S, self.X, self.T, self.r, self.q, self.sigma, self.N
+        dt = T / N
+        u = np.exp(sigma * np.sqrt(dt))
+        d = 1.0 / u
+        b = r - q
+        p = (np.exp(b * dt) - d) / (u - d)
+        p = np.clip(p, 0.0, 1.0)
+        df = np.exp(-r * dt)
 
+        # derivatives wrt r
+        dp_dr  = (dt * np.exp(b * dt)) / (u - d)     # from p = (e^{b dt}-d)/(u-d)
+        ddf_dr = -dt * df                             # from df = e^{-r dt}
+
+        # stock tree
+        S_tree = np.zeros((N+1, N+1))
+        S_tree[0,0] = S
+        for j in range(1, N+1):
+            S_tree[0:j, j] = S_tree[0:j, j-1] * u
+            S_tree[j,   j] = S_tree[j-1, j-1] * d
+
+        # value & rho trees (European: no early exercise)
+        V = np.zeros_like(S_tree)
+        R = np.zeros_like(S_tree)  # dV/dr
+        z = 1 if self.option_type == "call" else -1
+        V[:, N] = np.maximum(z * (S_tree[:, N] - X), 0.0)
+        # rho at maturity is 0
+        for j in range(N-1, -1, -1):
+            for i in range(j+1):
+                cont = p*V[i, j+1] + (1-p)*V[i+1, j+1]
+                V[i, j] = df * cont
+                # derivative of continuation value
+                R[i, j] = (
+                    ddf_dr * cont +
+                    df * (dp_dr * (V[i, j+1] - V[i+1, j+1]) + p*R[i, j+1] + (1-p)*R[i+1, j+1])
+                )
+
+        # return per 1% change in r (divide by 100)
+        return R[0, 0] / 100.0
+    
     def theta(self, convention="market_neg"):
         """
         Stable node-based theta using two-step central difference.
