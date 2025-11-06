@@ -1,7 +1,7 @@
 Metadata-Version: 2.4
 Name: fintech_utils
-Version: 0.1.0
-Summary: Utility functions extracted from Tests.ipynb
+Version: 0.1.1
+Summary: Utility functions for Fintech
 Author: Sean Guo
 Requires-Python: >=3.8
 License-File: LICENSE
