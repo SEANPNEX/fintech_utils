@@ -5,10 +5,32 @@ from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
+import asyncio
+from math import sqrt, exp
+from scipy.stats import norm
 
 from .config import MomentumConfig
 from .risk import compute_portfolio_es
 from .signal import MomentumSignal
+
+# --------------------------- Canonical position schema ---------------------------
+CANONICAL_POSITION_COLS = [
+    'symbol','S','X','T','r','q','sigma','option_type','qty','dtm','multiplier'
+]
+
+def _order_canonical(df: pd.DataFrame) -> pd.DataFrame:
+    """Return df with canonical columns first (preserve extras), creating missing with sensible defaults."""
+    defaults = {
+        'q': 0.0,
+        'multiplier': 1.0,
+    }
+    out = df.copy()
+    for c in CANONICAL_POSITION_COLS:
+        if c not in out.columns:
+            out[c] = defaults.get(c, np.nan)
+    # stable order: canonical first, then the rest
+    other = [c for c in out.columns if c not in CANONICAL_POSITION_COLS]
+    return out[CANONICAL_POSITION_COLS + other]
 
 # -------- helpers used by position control --------
 
@@ -152,8 +174,6 @@ class Monitor:
         self,
         positions: pd.DataFrame,
         signals: pd.Series,
-        long_exit: float = 0.3,
-        short_exit: float = 0.3,
     ) -> pd.DataFrame:
         """Suggest exits based on signal weakening.
 
@@ -161,19 +181,20 @@ class Monitor:
         ----------
         positions : DataFrame with columns ['symbol','option_type', ...]
         signals : pd.Series mapping symbol -> z-like score (positive = bullish, negative = bearish)
-        long_exit, short_exit : float
-            Hysteresis bands (contrarian): exit PUT shorts (long losers) if signal > -long_exit; exit CALL shorts (short winners) if signal < short_exit.
+
+        Thresholds are read from config: cfg.neutral_band (float).
         """
+        nb = float(getattr(self.cfg, 'neutral_band', 0.25))
         if 'symbol' not in positions.columns:
             raise ValueError("positions must have 'symbol' column for signal-based exits")
         side = positions['option_type'].str.lower().map({'call': 'short', 'put': 'long'})
         df = positions.copy()
         df['signal'] = df['symbol'].map(signals)
         df['exit_flag'] = False
-        # Long-momentum legs are implemented with PUT shorts; exit if signal > -long_exit (contrarian)
-        df.loc[(df['option_type'].str.lower() == 'put') & (df['signal'] > -long_exit), 'exit_flag'] = True
-        # Short-momentum legs are implemented with CALL shorts; exit if signal < short_exit (contrarian)
-        df.loc[(df['option_type'].str.lower() == 'call') & (df['signal'] < short_exit), 'exit_flag'] = True
+        # Long-momentum legs are implemented with PUT shorts; exit if signal > -nb (contrarian)
+        df.loc[(df['option_type'].str.lower() == 'put') & (df['signal'] > -nb), 'exit_flag'] = True
+        # Short-momentum legs are implemented with CALL shorts; exit if signal < nb (contrarian)
+        df.loc[(df['option_type'].str.lower() == 'call') & (df['signal'] < nb), 'exit_flag'] = True
         return df[df['exit_flag']].copy()
 
 
@@ -183,69 +204,36 @@ class Monitor:
         positions: pd.DataFrame,
         prices: Union[pd.DataFrame, Dict[str, pd.Series]],
         iv: Union[pd.DataFrame, Dict[str, pd.Series]],
-        *,
-        alpha: Optional[float] = None,
-        neutral_band: float = 0.25,
-        contrarian: bool = True,
-        gamma: float = 0.5,
-        base_qty: float = 1.0,
-        per_symbol_base: Optional[Dict[str, float]] = None,
-        contract_mult_col: str = 'multiplier',
-        round_to_int: bool = True,
     ) -> pd.DataFrame:
         """Compute **position differences** given ES budget and internally computed signals.
 
         Signals are computed internally via MomentumSignal based on provided prices.
 
-        Returns a DataFrame with columns:
-          symbol, current_qty, target_qty, delta_qty, dir_discrete, scale, exit_flag, ES, ES_target
-
-        Notes
-        -----
-        - Contrarian mapping (default): long losers (PUT shorts), short winners (CALL shorts).
-        - If an exit is triggered for a symbol, target is set to 0.
-        - `base_qty` or `per_symbol_base` define the magnitude of a unit position per symbol.
-        - If `contract_mult_col` exists in `positions`, it will be used only in reporting; quantities are integers in contracts.
+        All thresholds and switches are taken from cfg: es_alpha, es_target, neutral_band, contrarian, scale_gamma, base_qty, per_symbol_base, contract_mult_col, round_to_int.
         """
+        nb = float(getattr(self.cfg, 'neutral_band', 0.25))
+        contrarian = bool(getattr(self.cfg, 'contrarian', True))
+        gamma = float(getattr(self.cfg, 'scale_gamma', 0.5))
+        base_qty = float(getattr(self.cfg, 'base_qty', 1.0))
+        per_symbol_base = getattr(self.cfg, 'per_symbol_base', None)
+        contract_mult_col = str(getattr(self.cfg, 'contract_mult_col', 'multiplier'))
+        round_to_int = bool(getattr(self.cfg, 'round_to_int', True))
+        a = float(getattr(self.cfg, 'es_alpha', 0.05))
+
         # Compute per-symbol signals using MomentumSignal only (no math here)
         ms = MomentumSignal(self.cfg)
         pos_syms = positions['symbol'].astype(str).unique().tolist()
         price_df = prices if isinstance(prices, pd.DataFrame) else pd.DataFrame(prices)
 
-        signals = None
-        # Prefer a z-scored per-symbol method if it exists in signal.py
-        if hasattr(ms, 'zscore_by_symbol') and callable(getattr(ms, 'zscore_by_symbol')):
-            try:
-                zs = ms.zscore_by_symbol(price_df[pos_syms].dropna(axis=1, how='all'))
-                signals = zs.reindex(pos_syms).fillna(0.0)
-            except Exception:
-                signals = None
-        # Else prefer raw per-symbol scores if available
-        if signals is None and hasattr(ms, 'scores_by_symbol') and callable(getattr(ms, 'scores_by_symbol')):
-            try:
-                sc = ms.scores_by_symbol(price_df[pos_syms].dropna(axis=1, how='all'))
-                signals = sc.reindex(pos_syms).fillna(0.0)
-            except Exception:
-                signals = None
-        # Fallback: call generate_signal per symbol (still using signal.py API)
-        if signals is None:
-            sig_map: Dict[str, float] = {}
-            for sym in pos_syms:
-                if isinstance(price_df, pd.DataFrame) and sym in price_df.columns:
-                    try:
-                        sig_map[sym] = ms.generate_signal(price_df[[sym]])
-                    except Exception:
-                        sig_map[sym] = 0.0
-                else:
-                    sig_map[sym] = 0.0
-            signals = pd.Series(sig_map)
+        # Compute per-symbol signals via signal.py (single source of truth)
+        signals = ms.relative_signal(price_df[pos_syms].dropna(axis=1, how='all'))
+        signals = signals.reindex(pos_syms).fillna(0.0)
 
         # 1) Exit suggestions based on contrarian hysteresis
-        exits_df = self.exit_on_signal(positions, signals, long_exit=neutral_band, short_exit=neutral_band)
+        exits_df = self.exit_on_signal(positions, signals)
         exit_syms = set(exits_df['symbol']) if not exits_df.empty else set()
 
         # 2) ES nowcast for whole book and smooth scale vs ES target
-        a = float(alpha if alpha is not None else getattr(self.cfg, "es_alpha", 0.05))
         es_out = self.nowcast_es(positions, prices, iv, alpha=a)
         es_val = float(es_out.get('ES', np.nan))
         es_target = float(getattr(self.cfg, 'es_target', np.nan))
@@ -254,7 +242,7 @@ class Monitor:
         # 3) Build discrete directions per symbol
         dir_map: Dict[str, int] = {}
         for sym, sig in signals.items():
-            dir_map[str(sym)] = _discrete_direction(float(sig), neutral_band=neutral_band, contrarian=contrarian)
+            dir_map[str(sym)] = _discrete_direction(float(sig), neutral_band=nb, contrarian=contrarian)
 
         # 4) Determine base size per symbol
         def base_for(sym: str) -> float:
@@ -308,3 +296,114 @@ class Monitor:
         if contract_mult_col in out.columns and contract_mult_col not in cols:
             cols.append(contract_mult_col)
         return out[cols]
+
+    def rebalance(
+        self,
+        positions: pd.DataFrame,
+        prices: Union[pd.DataFrame, Dict[str, pd.Series]],
+        iv: Union[pd.DataFrame, Dict[str, pd.Series]],
+    ) -> pd.DataFrame:
+        """Return updated positions (same schema) with qty set to target quantities.
+
+        This enables a read→control→write→read workflow. Any extra columns are preserved.
+        """
+        ctrl = self.position_control(positions, prices, iv)
+        # Merge targets back into the original positions
+        pos2 = positions.copy()
+        pos2 = _order_canonical(pos2)
+        pos2 = pos2.merge(ctrl[['symbol','target_qty']], on='symbol', how='left', suffixes=('', '_ctrl'))
+        # If no target was produced for a symbol, keep its original qty
+        pos2['qty'] = np.where(pos2['target_qty'].notna(), pos2['target_qty'], pos2['qty']).astype(float)
+        pos2 = pos2.drop(columns=['target_qty'])
+        # Ensure canonical ordering and types
+        return _order_canonical(pos2)
+
+
+    async def build_portfolio_from_scratch(
+        self,
+        prices: pd.DataFrame,
+        percentile: float = 0.1,
+        r: float = 0.0414,
+    ) -> pd.DataFrame:
+        """Construct a new portfolio from raw price data and config settings.
+
+        Steps:
+        1. Compute momentum signals asynchronously via MomentumSignal.
+        2. Rank symbols and pick top/bottom percentiles.
+        3. Infer hypothetical option parameters (sell options only):
+           - Strike X from target delta (cfg.delta_range)
+           - Maturity T from dtm_range
+           - r defaults to 4.14% but can be overridden.
+        4. Use risk module to compute ES and adjust target positions.
+
+        Returns a DataFrame with: symbol, signal, S, X, T, sigma, option_type, ES, ES_target, target_qty.
+        """
+        
+
+        ms = MomentumSignal(self.cfg)
+
+        # Compute signals concurrently per symbol
+        async def score_one(sym: str) -> tuple[str, float]:
+            try:
+                val = ms.generate_signal(prices[[sym]])
+                return sym, float(val)
+            except Exception:
+                return sym, np.nan
+
+        tasks = [score_one(c) for c in prices.columns if prices[c].notna().sum() > self.cfg.momentum_window]
+        results = await asyncio.gather(*tasks)
+        sig_series = pd.Series({s: v for s, v in results}).dropna()
+
+        # Rank and select top/bottom percentiles
+        n = len(sig_series)
+        k = max(1, int(n * percentile))
+        winners = sig_series.sort_values(ascending=False).head(k)
+        losers = sig_series.sort_values(ascending=True).head(k)
+
+        selected = pd.concat([winners, losers])
+        selected.name = 'signal'
+
+        # Infer options to sell (puts for losers, calls for winners)
+        dtm_range = getattr(self.cfg, 'dtm_range', (30, 45))
+        delta_range = getattr(self.cfg, 'delta_range', (0.25, 0.40))
+        T_years = np.mean(dtm_range) / 365.0
+        target_delta = np.mean(delta_range)
+
+        rows = []
+        for sym, sig in selected.items():
+            S = float(prices[sym].iloc[-1])
+            sigma = prices[sym].pct_change().std() * np.sqrt(252.0)
+            opt_type = 'call' if sym in winners.index else 'put'
+            td = target_delta if opt_type == 'call' else -target_delta
+            z = norm.ppf(td if opt_type == 'call' else td + 1)
+            ln_S_over_X = sigma * np.sqrt(T_years) * z - (r + 0.5 * sigma * sigma) * T_years
+            X = S / np.exp(ln_S_over_X)
+
+            rows.append({
+                'symbol': sym,
+                'signal': sig,
+                'S': S,
+                'X': X,
+                'T': T_years,
+                'r': r,
+                'q': 0.0,
+                'sigma': sigma,
+                'option_type': opt_type,
+                'qty': 0.0,
+                'dtm': np.mean(dtm_range),
+                'multiplier': 1.0,
+            })
+
+        positions = pd.DataFrame(rows)
+
+        # Compute risk and scaled positions, then apply targets to get positions DataFrame
+        ctrl = self.position_control(positions, prices, iv=None)
+        # Attach signal for transparency, but preserve canonical schema
+        positions['signal'] = positions['symbol'].map(selected)
+        # Apply targets (qty := target_qty)
+        reb = positions.merge(ctrl[['symbol','target_qty','ES','ES_target','scale']], on='symbol', how='left')
+        reb['qty'] = reb['target_qty'].fillna(0.0).astype(float)
+        reb = reb.drop(columns=['target_qty'])
+        # Canonical ordering with extras kept
+        reb = _order_canonical(reb)
+        return reb
