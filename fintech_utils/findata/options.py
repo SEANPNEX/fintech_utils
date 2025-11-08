@@ -231,7 +231,7 @@ class binomial_greeks:
         Rho for American option with continuous dividend yield.
         Computed by finite differencing the binomial tree prices.
         """
-        eps = max(self.abs_bump_r, 1e-4)  # small absolute bump in rate
+        eps = max(self.abs_bump_r, 1e-5)  # small absolute bump in rate
         Vu = self._price(r=self.r + eps)
         Vd = self._price(r=self.r - eps)
         rho_val = (Vu - Vd) / (2 * eps)
@@ -249,3 +249,79 @@ class binomial_greeks:
         elif convention == "abs":
             return abs(theta_val)
         return theta_val
+    
+
+def bt_american_discrete_div(call, S, X, T, r, div_amts, div_times_steps, sigma, N):
+    """
+    American option with DISCRETE CASH dividends using recursive split at each dividend date.
+    div_times_steps: iterable of integer step indices k in [1, N] for ex-div dates.
+    div_amts: same length, cash amounts paid at those steps.
+    """
+    # base cases: no dividends or first dividend beyond the grid -> standard American (no discrete divs)
+    if len(div_amts) == 0 or len(div_times_steps) == 0:
+        return _bt_american_no_discrete_div(call, S, X, T, r, sigma, N)
+    k1 = int(div_times_steps[0])
+    if k1 > N:
+        return _bt_american_no_discrete_div(call, S, X, T, r, sigma, N)
+
+    dt = T / N
+    u  = np.exp(sigma * np.sqrt(dt))
+    d  = 1.0 / u
+    p  = (np.exp(r*dt) - d) / (u - d)
+    p  = np.clip(p, 0.0, 1.0)
+    df = np.exp(-r*dt)
+    z  = +1 if call else -1
+
+    # triangular indexing helpers
+    def nnode(n):  # total nodes from level 0..n
+        return (n+1)*(n+2)//2
+    def idx(i, j):  # 0-based
+        return ((j)*(j+1))//2 + i
+
+    # storage up to first dividend level k1
+    V = np.empty(nnode(k1))
+    # backward through levels j = k1 .. 0
+    for j in range(k1, -1, -1):
+        for i in range(j, -1, -1):
+            price = S * (u**i) * (d**(j - i))
+            if j < k1:
+                # normal backward induction before dividend date
+                cont = df * (p * V[idx(i+1, j+1)] + (1 - p) * V[idx(i, j+1)])
+                exer = max(0.0, z*(price - X))
+                V[idx(i, j)] = max(exer, cont)
+            else:
+                # at the dividend date: choose between exercising now or holding through the jump
+                S_after = max(price - float(div_amts[0]), 0.0)
+                # recursive tail: remaining time, steps, and shifted dividends
+                tail_T   = T - k1*dt
+                tail_N   = N - k1
+                tail_div_amts  = div_amts[1:]
+                tail_div_steps = [k - k1 for k in div_times_steps[1:]]
+                hold_val = bt_american_discrete_div(call, S_after, X, tail_T, r,
+                                                    tail_div_amts, tail_div_steps, sigma, tail_N)
+                exer_val = max(0.0, z*(price - X))
+                V[idx(i, j)] = max(hold_val, exer_val)
+
+    return float(V[0])
+
+
+def _bt_american_no_discrete_div(call, S, X, T, r, sigma, N):
+    """Standard CRR American with NO discrete dividends (early exercise allowed)."""
+    dt = T / N
+    u  = np.exp(sigma * np.sqrt(dt))
+    d  = 1.0 / u
+    p  = (np.exp(r*dt) - d) / (u - d)
+    p  = np.clip(p, 0.0, 1.0)
+    df = np.exp(-r*dt)
+    z  = +1 if call else -1
+
+    # terminal layer
+    ST = S * (u ** np.arange(N, -1, -1)) * (d ** np.arange(0, N+1, 1))
+    V  = np.maximum(z*(ST - X), 0.0)
+
+    # backward induction
+    for j in range(N-1, -1, -1):
+        V = df * (p * V[:-1] + (1 - p) * V[1:])
+        S_layer = S * (u ** np.arange(j, -1, -1)) * (d ** np.arange(0, j+1, 1))
+        V = np.maximum(V, np.maximum(z*(S_layer - X), 0.0))
+    return float(V[0])
